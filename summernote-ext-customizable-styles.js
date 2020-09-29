@@ -331,6 +331,7 @@
         }
       });
       rebuildMenu();
+      context.triggerEvent('customizableStyle.stylesUpdated', styleTags);
     };
 
     const summernoteStyleToCss = (style) => {
