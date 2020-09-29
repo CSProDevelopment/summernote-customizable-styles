@@ -17,6 +17,9 @@
   const CustomizableStylePlugin = function(context) {
 
     const ui = $.summernote.ui;
+    const range = $.summernote.range;
+    const dom = $.summernote.dom;
+    const lists = $.summernote.lists;
     const options = context.options;
     const lang = options.langInfo;
     const styleConverter = context.modules.editor.style;
@@ -29,7 +32,7 @@
         ui.button({
           className: 'dropdown-toggle',
           contents: ui.dropdownButtonContents(
-            ui.icon(options.icons.magic), options,
+              ui.icon(options.icons.magic), options,
           ),
           tooltip: lang.style.style,
           data: {toggle: 'dropdown'},
@@ -43,7 +46,8 @@
           click: (event) => {
             event.preventDefault();
             const $target = $(event.target);
-            const value = $target.closest('[data-value]').data('value');
+            const menuItem = $target.closest('[data-value]');
+            const value = menuItem.data('value');
             if (value === lang.customizableStyle.addStyleMenu) {
               showAddStyleDialog(getCurrentEditorStyle());
             } else if (value === lang.customizableStyle.editStylesMenu) {
@@ -53,7 +57,9 @@
                 showAddStyleDialog(getCurrentEditorStyle());
               }
             } else {
-              context.invoke('editor.formatBlock', value, $target);
+              const tag = value;
+              const className = menuItem.children().prop('class');
+              context.invoke('customizableStyle.applyStyle', tag, className);
             }
           },
         })]).render();
@@ -92,8 +98,8 @@
     const createAddStyleDialog = () => {
       const $container = options.dialogsInBody ? $('body') : options.container;
       const body = '<div class="form-group note-form-group"><input class="form-control note-form-control note-input customizable-styles-text-input" type="text" placeholder="' + lang.customizableStyle.styleNamePlaceholder + '"/></div>'
-        + '<div class="form-group note-form-group"><div class="customizable-styles-note"/></div>'
-        + '<div class="form-group note-form-group"><div class="customizable-styles-preview-text"><p>' + lang.customizableStyle.preview + '</p></div></div>';
+          + '<div class="form-group note-form-group"><div class="customizable-styles-note"/></div>'
+          + '<div class="form-group note-form-group"><div class="customizable-styles-preview-text"><span>' + lang.customizableStyle.preview + '</span></div></div>';
       const footer = '<input type="button" class="btn btn-primary note-btn note-btn-primary customizable-styles-add-btn" value="' + lang.customizableStyle.add + '">';
       const $dialog = ui.dialog({
         className: 'add-style-dialog',
@@ -111,9 +117,9 @@
     const createEditStylesDialog = () => {
       const $container = options.dialogsInBody ? $('body') : options.container;
       const body = '<div class="form-group note-form-group"><div class="customizable-styles-select-style-dropdown"/></div>'
-        + '<div class="form-group note-form-group"><div class="customizable-styles-note"/></div>'
-        + '<div class="form-group note-form-group"><div class="customizable-styles-preview-text"><p>' + lang.customizableStyle.preview + '</p></div>'
-        + '<div class="form-group note-form-group"><button class="btn btn-secondary note-btn-secondary customizable-styles-delete-btn">' + lang.customizableStyle.deleteStyle + '</button></div></div>';
+          + '<div class="form-group note-form-group"><div class="customizable-styles-note"/></div>'
+          + '<div class="form-group note-form-group"><div class="customizable-styles-preview-text"><span>' + lang.customizableStyle.preview + '</span></div>'
+          + '<div class="form-group note-form-group"><button class="btn btn-secondary note-btn-secondary customizable-styles-delete-btn">' + lang.customizableStyle.deleteStyle + '</button></div></div>';
       const footer = '<input type="button" class="btn btn-primary note-btn note-btn-primary customizable-styles-apply-btn" value="' + lang.customizableStyle.apply + '">';
       const $dialog = ui.dialog({
         className: 'edit-style-dialog',
@@ -194,7 +200,7 @@
       // style menu is built from the styleTag list in options
       // see https://summernote.org/deep-dive/#custom-styles for a description
       // of the item format. classCss is a custom attribute only used by this plugin.
-      const styleTag = {tag: 'p', title: name, className: className, value: 'p', style: style};
+      const styleTag = {tag: 'span', title: name, className: className, value: 'span', style: style};
       options.styleTags.push(styleTag);
       rebuildMenu();
     };
@@ -232,6 +238,80 @@
       return name.replace(/[^a-zA-Z0-9_-]/g, "-");
     };
 
+    // Get set of first block level ancestor of all nodes in a list
+    // e.g. if you have the following HTML <p>foo <span>bar</span></p><h1>baz</h1>
+    // and nodes = ['<span>bar</span>', '<h1>baz</h1>']
+    // the result will be the <p> and <h1> nodes
+    const getBlockAncestorNodes = (nodes) => {
+      return lists.compact(lists.unique(nodes.map((n) => dom.ancestor(n, dom.isPara))));
+    };
+
+    // Change all block level nodes in a range to use the new tag nodeName
+    // Splits nodes as needed to only apply the new block to the selected
+    // part of partially selected nodes.
+    const applyBlockTag = (rng, nodeName) => {
+      rng = rng.splitText();
+      if (rng.isCollapsed()) {
+        return [rng.insertNode(dom.create(nodeName))];
+      }
+
+      let nodes = rng.nodes();
+      let blockParentNodes = getBlockAncestorNodes(nodes);
+      if (blockParentNodes || blockParentNodes.length === 0) {
+        // No top level block node anywhere in the editor text - add one in
+        // so that below code will work
+        context.layoutInfo.editable.contents().wrapAll('<p>');
+        blockParentNodes = getBlockAncestorNodes(nodes);
+      }
+
+      let startPoint = rng.getStartPoint();
+      let endPoint = rng.getEndPoint();
+      const newParents = blockParentNodes.map((parent) => {
+        if (parent.contains(startPoint.node) && !dom.isLeftEdgePointOf(startPoint, parent)) {
+          parent = dom.splitTree(parent, startPoint);
+        }
+        if (parent.contains(endPoint.node) && !dom.isRightEdgePointOf(endPoint, parent)) {
+          dom.splitTree(parent, endPoint);
+        }
+        return dom.replace(parent, nodeName);
+      });
+
+      nodes = nodes.filter((n) => !lists.contains(blockParentNodes, n)).concat(newParents);
+
+      return nodes;
+    };
+
+    this.applyStyle = (tag, className) => {
+
+      const editor = context.modules.editor;
+      let rng = editor.getLastRange();
+      const spans = dom.isPara(dom.create(tag)) ?
+          applyBlockTag(rng, tag) :
+          editor.style.styleNodes(rng, { nodeName: tag });
+      if ($(spans).className)
+        $(spans).removeClass();
+      if (className)
+        $(spans).addClass(className);
+
+      // This is copied from fontStyling() in Editor.js
+      // It handles the case where there is no selection
+      // and you need to insert a new span with the new format
+      // so that when you start typing it inserts with the new style
+      if (rng.isCollapsed()) {
+        const firstSpan = lists.head(spans);
+        if (firstSpan && !dom.nodeLength(firstSpan)) {
+          firstSpan.innerHTML = dom.ZERO_WIDTH_NBSP_CHAR;
+          range.createFromNode(firstSpan.firstChild).select();
+          editor.setLastRange();
+          editor.$editable.data(editor.KEY_BOGUS, firstSpan);
+        }
+      } else {
+        editor.setLastRange(
+            editor.createRangeFromList(spans).select(),
+        );
+      }
+    };
+
     this.addStyle = (name, style) => {
       const className = makeValidClassName(name);
       addStyleToDom(className, style);
@@ -254,7 +334,7 @@
     };
 
     const summernoteStyleToCss = (style) => {
-      const $element = $('<p>');
+      const $element = $('<span>');
       if (style['font-bold'] === 'bold')
         $element.css('font-weight', 'bold');
       if (style['font-italic'] === 'italic')
@@ -269,7 +349,7 @@
     };
 
     const cssStyleToSummernoteStyle = (css) => {
-      const $element = $('<p>').attr('style', css);
+      const $element = $('<span>').attr('style', css);
 
       // This gets font-family, font-size and some other stuff
       const styleInfo = styleConverter.fromNode($element);
@@ -297,10 +377,9 @@
     // applied to the element $previewText
     const preview = ($previewText, context) => {
       let style = {};
-      let tag = 'p';
+      let tag = 'span';
 
       const update = () => {
-        console.log("preview update", style);
         const $newPreviewText = $('<' + tag + '>').append(lang.customizableStyle.preview);
         $previewText.replaceWith($newPreviewText);
         $previewText = $newPreviewText;
@@ -352,7 +431,7 @@
         currentTag: () => tag,
         setCurrentStyle: (s, t) => {
           style = s;
-          tag = t || 'p';
+          tag = t || 'span';
           update();
         },
       };
@@ -415,7 +494,6 @@
 
       const saveUpdateForCurrentStyle = () => {
         if (currentStyleIndex >= 0) {
-          console.log("saveUpdateForCurrentStyle", currentStyleIndex, styles[currentStyleIndex]);
           const newStyle = this.$editStylesDialog.preview.currentStyle();
           if (typeof styles[currentStyleIndex] === 'string' && $.isEmptyObject(newStyle))
             return;
@@ -425,7 +503,6 @@
             styles[currentStyleIndex].className = tag;
           }
           styles[currentStyleIndex].style = summernoteStyleToCss(newStyle);
-          console.log("after update", styles[currentStyleIndex]);
         }
       };
 
@@ -446,18 +523,18 @@
 
       const updateDropdownList = () => {
         this.$editStylesDialog
-          .find('.customizable-style-dialog-style-dropdown')
-          .replaceWith(ui.dropdown({
-            className: 'customizable-style-dialog-style-dropdown',
-            items: styles,
-            title: lang.style.style,
-            template: styleDropdownItemTemplate,
-            click: (event) => {
-              event.preventDefault();
-              const $target = $(event.target);
-              setDropdownSelection($target.parent().index());
-            },
-          }).render());
+            .find('.customizable-style-dialog-style-dropdown')
+            .replaceWith(ui.dropdown({
+              className: 'customizable-style-dialog-style-dropdown',
+              items: styles,
+              title: lang.style.style,
+              template: styleDropdownItemTemplate,
+              click: (event) => {
+                event.preventDefault();
+                const $target = $(event.target);
+                setDropdownSelection($target.parent().index());
+              },
+            }).render());
         this.$editStylesDialog.find('.customizable-styles-select-style-dropdown').children().css('width', '100%'); // fix dropdown menu too narrow
       };
 
