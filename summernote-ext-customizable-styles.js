@@ -532,7 +532,12 @@
               click: (event) => {
                 event.preventDefault();
                 const $target = $(event.target);
-                setDropdownSelection($target.parent().index());
+                const selectedIndex = styles.findIndex((t) => {
+                  if (typeof t === 'string')
+                    t = stringStyleTagToObject(t);
+                  return t.title === $target.text()
+                });
+                setDropdownSelection(selectedIndex);
               },
             }).render());
         this.$editStylesDialog.find('.customizable-styles-select-style-dropdown').children().css('width', '100%'); // fix dropdown menu too narrow
